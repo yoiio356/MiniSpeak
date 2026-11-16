@@ -49,18 +49,21 @@ const htmlPage = `<!DOCTYPE html>
     let isMuted = false;
 
     const rtcConfig = {
-        iceServers: [{ urls: 'stun:://google.com' }]
+        iceServers: [
+            { urls: 'stun:://google.com' },
+            { urls: 'stun:://google.com' }
+        ]
     };
 
     async function joinRoom() {
         const username = document.getElementById('username').value.trim();
-        const room = document.getElementById('room').value.trim();
+        const room = document.getElementById('room').value.trim().toLowerCase();
         if (!username || !room) return alert('Введите ник и комнату!');
 
         try {
             localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         } catch (err) {
-            return alert('Нет доступа к микрофону!');
+            return alert('Нет доступа к микрофону! Проверьте разрешения браузера.');
         }
 
         document.getElementById('login-screen').classList.add('hidden');
@@ -70,6 +73,12 @@ const htmlPage = `<!DOCTYPE html>
         detectSpeaking(localStream, 'me');
 
         socket.emit('join-room', room, username);
+
+        socket.on('existing-users', (users) => {
+            users.forEach(user => {
+                addUserToList(user.id, user.username);
+            });
+        });
 
         socket.on('user-connected', async ({ id, username: remoteName }) => {
             addUserToList(id, remoteName);
@@ -101,6 +110,8 @@ const htmlPage = `<!DOCTYPE html>
             delete peers[id];
             const el = document.getElementById('user-' + id);
             if (el) el.remove();
+            const audio = document.getElementById('audio-' + id);
+            if (audio) audio.remove();
         });
     }
 
@@ -115,6 +126,7 @@ const htmlPage = `<!DOCTYPE html>
         };
 
         peer.ontrack = (e) => {
+            const remoteStream = e.streams[0];
             let audio = document.getElementById('audio-' + targetId);
             if (!audio) {
                 audio = document.createElement('audio');
@@ -122,8 +134,8 @@ const htmlPage = `<!DOCTYPE html>
                 audio.autoplay = true;
                 document.body.appendChild(audio);
             }
-            audio.srcObject = e.streams[0];
-            detectSpeaking(e.streams[0], targetId);
+            audio.srcObject = remoteStream;
+            detectSpeaking(remoteStream, targetId);
         };
 
         if (isInitiator) {
@@ -138,25 +150,27 @@ const htmlPage = `<!DOCTYPE html>
     }
 
     function detectSpeaking(stream, userId) {
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const source = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 256;
-        source.connect(analyser);
-        const data = new Uint8Array(analyser.frequencyBinCount);
+        try {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const source = audioCtx.createMediaStreamSource(stream);
+            const analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
+            const data = new Uint8Array(analyser.frequencyBinCount);
 
-        setInterval(() => {
-            analyser.getByteFrequencyData(data);
-            const volume = data.reduce((a, b) => a + b) / data.length;
-            const el = document.getElementById('user-' + userId);
-            if (el) {
-                if (volume > 15 && !(userId === 'me' && isMuted)) {
-                    el.classList.add('speaking');
-                } else {
-                    el.classList.remove('speaking');
+            setInterval(() => {
+                analyser.getByteFrequencyData(data);
+                const volume = data.reduce((a, b) => a + b) / data.length;
+                const el = document.getElementById('user-' + userId);
+                if (el) {
+                    if (volume > 15 && !(userId === 'me' && isMuted)) {
+                        el.classList.add('speaking');
+                    } else {
+                        el.classList.remove('speaking');
+                    }
                 }
-            }
-        }, 100);
+            }, 100);
+        } catch (e) {}
     }
 
     function toggleMute() {
@@ -182,9 +196,16 @@ app.get('/', (req, res) => {
     res.send(htmlPage);
 });
 
+const rooms = {};
+
 io.on('connection', (socket) => {
     socket.on('join-room', (roomId, username) => {
         socket.join(roomId);
+        if (!rooms[roomId]) rooms[roomId] = [];
+
+        socket.emit('existing-users', rooms[roomId]);
+
+        rooms[roomId].push({ id: socket.id, username });
         socket.to(roomId).emit('user-connected', { id: socket.id, username });
 
         socket.on('signal', (data) => {
@@ -196,6 +217,10 @@ io.on('connection', (socket) => {
         });
 
         socket.on('disconnect', () => {
+            if (rooms[roomId]) {
+                rooms[roomId] = rooms[roomId].filter(u => u.id !== socket.id);
+                if (rooms[roomId].length === 0) delete rooms[roomId];
+            }
             socket.to(roomId).emit('user-disconnected', socket.id);
         });
     });
@@ -203,5 +228,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log('MiniSpeak запущен! Откройте в браузере: http://localhost:' + PORT);
+    console.log('MiniSpeak запущен на порту ' + PORT);
 });
